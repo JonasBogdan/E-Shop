@@ -1,0 +1,143 @@
+{
+  "common": {
+    "addToCart": "Pridėti į krepšelį",
+    "viewDetails": "Peržiūrėti",
+    "outOfStock": "Išparduota",
+    "inStock": "Yra sandėlyje",
+    "search": "Ieškoti produktų...",
+    "currency": "EUR",
+    "loading": "Kraunama...",
+    "error": "Kažkas nepavyko",
+    "backToHome": "Grįžti į pradžią"
+  },
+  "nav": {
+    "home": "Pradžia",
+    "dogFood": "Šunų maistas",
+    "catFood": "Kačių maistas",
+    "misc": "Kita",
+    "supplements": "Papildai",
+    "cart": "Krepšelis",
+    "account": "Paskyra",
+    "login": "Prisijungti",
+    "signup": "Registruotis",
+    "logout": "Atsijungti",
+    "admin": "Administravimas",
+    "contact": "Kontaktai",
+    "orders": "Mano užsakymai",
+    "favorites": "Mėgstami"
+  },
+  "home": {
+    "heroTitle": "Aukščiausios kokybės gyvūnų maistas pristatomas iki durų",
+    "heroSubtitle": "Kokybiška mityba jūsų mylimims šunims ir katėms",
+    "shopNow": "Apsipirkti",
+    "featuredProducts": "Rekomenduojami produktai",
+    "browseCategories": "Naršyti kategorijas",
+    "contactBanner": "Norite užsakyti telefonu? Skambinkite {phone}"
+  },
+  "product": {
+    "price": "Kaina",
+    "weight": "Svoris",
+    "quantity": "Kiekis",
+    "description": "Aprašymas",
+    "addedToCart": "Pridėta į krepšelį!",
+    "relatedProducts": "Panašūs produktai"
+  },
+  "search": {
+    "noResults": "Produktų nerasta pagal \"{query}\".",
+    "results": "{count, plural, =1 {1 produktas} other {# produktai}} rasta"
+  },
+  "category": {
+    "allProducts": "Visi produktai",
+    "sortBy": "Rūšiuoti pagal",
+    "priceLowHigh": "Kaina: nuo mažiausios",
+    "priceHighLow": "Kaina: nuo didžiausios",
+    "newest": "Naujausias",
+    "noProducts": "Šioje kategorijoje produktų nerasta."
+  },
+  "cart": {
+    "title": "Pirkinių krepšelis",
+    "empty": "Jūsų krepšelis tuščias",
+    "continueShopping": "Tęsti apsipirkimą",
+    "subtotal": "Tarpinė suma",
+    "total": "Viso",
+    "checkout": "Pereiti prie apmokėjimo",
+    "remove": "Pašalinti",
+    "items": "{count, plural, =0 {Nėra prekių} =1 {1 prekė} other {# prekės}}"
+  },
+  "checkout": {
+    "title": "Apmokėjimas",
+    "customerInfo": "Kliento informacija",
+    "shippingAddress": "Pristatymo adresas",
+    "fullName": "Vardas ir pavardė",
+    "email": "El. paštas",
+    "phone": "Telefonas",
+    "address": "Adresas",
+    "city": "Miestas",
+    "postalCode": "Pašto kodas",
+    "country": "Šalis",
+    "payWithStripe": "Mokėti per Stripe",
+    "successTitle": "Užsakymas patvirtintas!",
+    "successMessage": "Dėkojame už užsakymą. Netrukus gausite patvirtinimo el. laišką.",
+    "orderNumber": "Užsakymo numeris"
+  },
+  "contact": {
+    "title": "Susisiekite su mumis",
+    "phone": "Telefonas",
+    "email": "El. paštas",
+    "hours": "Darbo laikas",
+    "orderByPhone": "Taip pat galite pateikti užsakymus paskambinę mums arba atsiuntę el. laišką su norimais produktais."
+  },
+  "account": {
+    "profile": "Profilis",
+    "orders": "Užsakymų istorija",
+    "favorites": "Mėgstami",
+    "noOrders": "Dar neturite užsakymų.",
+    "noFavorites": "Dar neturite mėgstamų produktų.",
+    "editProfile": "Redaguoti profilį",
+    "save": "Išsaugoti pakeitimus"
+  },
+  "auth": {
+    "loginTitle": "Sveiki sugrįžę",
+    "signupTitle": "Sukurti paskyrą",
+    "email": "El. paštas",
+    "password": "Slaptažodis",
+    "fullName": "Vardas ir pavardė",
+    "loginButton": "Prisijungti",
+    "signupButton": "Registruotis",
+    "noAccount": "Neturite paskyros?",
+    "hasAccount": "Jau turite paskyrą?",
+    "orContinueWith": "Arba tęskite su",
+    "confirmPassword": "Pakartokite slaptažodį",
+    "passwordMismatch": "Slaptažodžiai nesutampa.",
+    "forgotPassword": "Pamiršote slaptažodį?",
+    "resetPassword": "Atstatyti slaptažodį",
+    "resetSent": "Patikrinkite el. pašto dėžutėje nuorodą slaptažodžio atkūrimui.",
+    "backToLogin": "Grįžti prie prisijungimo"
+  },
+  "admin": {
+    "dashboard": "Valdymo skydelis",
+    "products": "Produktai",
+    "orders": "Užsakymai",
+    "addProduct": "Pridėti produktą",
+    "editProduct": "Redaguoti produktą",
+    "totalProducts": "Viso produktų",
+    "totalOrders": "Viso užsakymų",
+    "recentOrders": "Naujausi užsakymai",
+    "productName": "Produkto pavadinimas",
+    "deleteConfirm": "Ar tikrai norite ištrinti šį produktą?"
+  },
+  "footer": {
+    "rights": "Visos teisės saugomos.",
+    "description": "Jūsų patikimas aukščiausios kokybės gyvūnų maisto ir prekių šaltinis.",
+    "privacyPolicy": "Privatumo politika",
+    "terms": "Taisyklės ir sąlygos",
+    "delivery": "Pristatymas ir grąžinimas",
+    "about": "Apie mus"
+  },
+  "cookies": {
+    "message": "Naudojame slapukus, kad pagerintume jūsų patirtį. Tęsdami naršymą, sutinkate su mūsų slapukų naudojimu.",
+    "accept": "Sutikti",
+    "decline": "Atsisakyti",
+    "learnMore": "Privatumo politika"
+  }
+}

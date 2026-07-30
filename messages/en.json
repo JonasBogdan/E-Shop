@@ -1,0 +1,143 @@
+{
+  "common": {
+    "addToCart": "Add to Cart",
+    "viewDetails": "View Details",
+    "outOfStock": "Out of Stock",
+    "inStock": "In Stock",
+    "search": "Search products...",
+    "currency": "EUR",
+    "loading": "Loading...",
+    "error": "Something went wrong",
+    "backToHome": "Back to Home"
+  },
+  "nav": {
+    "home": "Home",
+    "dogFood": "Dog Food",
+    "catFood": "Cat Food",
+    "misc": "Miscellaneous",
+    "supplements": "Supplements",
+    "cart": "Cart",
+    "account": "Account",
+    "login": "Log In",
+    "signup": "Sign Up",
+    "logout": "Log Out",
+    "admin": "Admin Panel",
+    "contact": "Contact",
+    "orders": "My Orders",
+    "favorites": "Favorites"
+  },
+  "home": {
+    "heroTitle": "Premium Pet Food Delivered to Your Door",
+    "heroSubtitle": "Quality nutrition for your beloved dogs and cats",
+    "shopNow": "Shop Now",
+    "featuredProducts": "Featured Products",
+    "browseCategories": "Browse Categories",
+    "contactBanner": "Prefer to order by phone? Call us at {phone}"
+  },
+  "product": {
+    "price": "Price",
+    "weight": "Weight",
+    "quantity": "Quantity",
+    "description": "Description",
+    "addedToCart": "Added to cart!",
+    "relatedProducts": "Related Products"
+  },
+  "search": {
+    "noResults": "No products found for \"{query}\".",
+    "results": "{count, plural, =1 {1 product} other {# products}} found"
+  },
+  "category": {
+    "allProducts": "All Products",
+    "sortBy": "Sort by",
+    "priceLowHigh": "Price: Low to High",
+    "priceHighLow": "Price: High to Low",
+    "newest": "Newest",
+    "noProducts": "No products found in this category."
+  },
+  "cart": {
+    "title": "Shopping Cart",
+    "empty": "Your cart is empty",
+    "continueShopping": "Continue Shopping",
+    "subtotal": "Subtotal",
+    "total": "Total",
+    "checkout": "Proceed to Checkout",
+    "remove": "Remove",
+    "items": "{count, plural, =0 {No items} =1 {1 item} other {# items}}"
+  },
+  "checkout": {
+    "title": "Checkout",
+    "customerInfo": "Customer Information",
+    "shippingAddress": "Shipping Address",
+    "fullName": "Full Name",
+    "email": "Email",
+    "phone": "Phone",
+    "address": "Address",
+    "city": "City",
+    "postalCode": "Postal Code",
+    "country": "Country",
+    "payWithStripe": "Pay with Stripe",
+    "successTitle": "Order Confirmed!",
+    "successMessage": "Thank you for your order. You will receive a confirmation email shortly.",
+    "orderNumber": "Order number"
+  },
+  "contact": {
+    "title": "Contact Us",
+    "phone": "Phone",
+    "email": "Email",
+    "hours": "Working Hours",
+    "orderByPhone": "You can also place orders by calling us or sending an email with the products you want."
+  },
+  "account": {
+    "profile": "Profile",
+    "orders": "Order History",
+    "favorites": "Favorites",
+    "noOrders": "You haven't placed any orders yet.",
+    "noFavorites": "You haven't saved any favorites yet.",
+    "editProfile": "Edit Profile",
+    "save": "Save Changes"
+  },
+  "auth": {
+    "loginTitle": "Welcome Back",
+    "signupTitle": "Create Account",
+    "email": "Email",
+    "password": "Password",
+    "fullName": "Full Name",
+    "loginButton": "Log In",
+    "signupButton": "Sign Up",
+    "noAccount": "Don't have an account?",
+    "hasAccount": "Already have an account?",
+    "orContinueWith": "Or continue with",
+    "confirmPassword": "Confirm Password",
+    "passwordMismatch": "Passwords do not match.",
+    "forgotPassword": "Forgot password?",
+    "resetPassword": "Reset Password",
+    "resetSent": "Check your email for a password reset link.",
+    "backToLogin": "Back to Login"
+  },
+  "admin": {
+    "dashboard": "Dashboard",
+    "products": "Products",
+    "orders": "Orders",
+    "addProduct": "Add Product",
+    "editProduct": "Edit Product",
+    "totalProducts": "Total Products",
+    "totalOrders": "Total Orders",
+    "recentOrders": "Recent Orders",
+    "productName": "Product Name",
+    "deleteConfirm": "Are you sure you want to delete this product?"
+  },
+  "footer": {
+    "rights": "All rights reserved.",
+    "description": "Your trusted source for premium pet food and supplies.",
+    "privacyPolicy": "Privacy Policy",
+    "terms": "Terms & Conditions",
+    "delivery": "Delivery & Returns",
+    "about": "About Us"
+  },
+  "cookies": {
+    "message": "We use cookies to improve your experience. By continuing to browse, you agree to our use of cookies.",
+    "accept": "Accept All",
+    "decline": "Decline",
+    "learnMore": "Privacy Policy"
+  }
+}

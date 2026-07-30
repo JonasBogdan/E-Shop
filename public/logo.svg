@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" fill="none">
+  <!-- Left dog ear (large rounded oval, tilted) -->
+  <ellipse cx="42" cy="82" rx="26" ry="38" transform="rotate(-12 42 82)" stroke="currentColor" stroke-width="4.5" fill="none"/>
+  <!-- Left ear inner oval -->
+  <ellipse cx="42" cy="82" rx="14" ry="24" transform="rotate(-12 42 82)" stroke="currentColor" stroke-width="3" fill="none"/>
+  <!-- Right cat ear (small pointed triangle) -->
+  <path d="M112 52 L128 24 L138 56" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Head circle -->
+  <circle cx="88" cy="96" r="60" stroke="currentColor" stroke-width="4.5" fill="none"/>
+  <!-- Left eye (closed arc) -->
+  <path d="M68 88 Q75 83 82 88" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+  <!-- Right eye (closed arc) -->
+  <path d="M93 88 Q100 83 107 88" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+  <!-- Nose (small upward triangle) -->
+  <path d="M84 104 L88 98 L92 104 Z" fill="currentColor"/>
+</svg>
