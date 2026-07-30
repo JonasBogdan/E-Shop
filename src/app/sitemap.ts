@@ -9,12 +9,20 @@ function url(path: string) {
 }
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-  const supabase = createAdminClient();
+  let categories: { slug: string; updated_at: string | null }[] = [];
+  let products: { slug: string; updated_at: string | null }[] = [];
 
-  const [{ data: categories }, { data: products }] = await Promise.all([
-    supabase.from("categories").select("slug, updated_at"),
-    supabase.from("products").select("slug, updated_at").eq("is_active", true),
-  ]);
+  try {
+    const supabase = createAdminClient();
+    const [catResult, prodResult] = await Promise.all([
+      supabase.from("categories").select("slug, updated_at"),
+      supabase.from("products").select("slug, updated_at").eq("is_active", true),
+    ]);
+    categories = catResult.data ?? [];
+    products = prodResult.data ?? [];
+  } catch {
+    // Supabase unreachable at build time — return only static routes
+  }
 
   const staticRoutes: MetadataRoute.Sitemap = [
     { url: url("/en"), lastModified: new Date(), alternates: { languages: { en: url("/en"), lt: url("/lt") } } },
@@ -25,14 +33,14 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     { url: url("/en/delivery"), lastModified: new Date(), alternates: { languages: { en: url("/en/delivery"), lt: url("/lt/delivery") } } },
   ];
 
-  const categoryRoutes: MetadataRoute.Sitemap = (categories ?? []).flatMap((c) =>
+  const categoryRoutes: MetadataRoute.Sitemap = categories.flatMap((c) =>
     locales.map((locale) => ({
       url: url(`/${locale}/category/${c.slug}`),
       lastModified: c.updated_at ? new Date(c.updated_at) : new Date(),
     }))
   );
 
-  const productRoutes: MetadataRoute.Sitemap = (products ?? []).flatMap((p) =>
+  const productRoutes: MetadataRoute.Sitemap = products.flatMap((p) =>
     locales.map((locale) => ({
       url: url(`/${locale}/product/${p.slug}`),
       lastModified: p.updated_at ? new Date(p.updated_at) : new Date(),

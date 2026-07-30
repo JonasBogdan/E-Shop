@@ -1,6 +1,8 @@
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import { Link } from "@/i18n/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
+
+export const dynamic = 'force-dynamic';
 import { getLocalizedField, formatPrice } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { CONTACT_PHONE } from "@/lib/constants";
