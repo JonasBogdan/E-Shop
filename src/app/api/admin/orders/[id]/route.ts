@@ -62,3 +62,23 @@ export async function PATCH(
 
   return NextResponse.json({ success: true });
 }
+
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const user = await verifyAdmin();
+  if (!user)
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const { id } = await params;
+  const adminSupabase = createAdminClient();
+
+  await adminSupabase.from("order_items").delete().eq("order_id", id);
+  const { error } = await adminSupabase.from("orders").delete().eq("id", id);
+
+  if (error)
+    return NextResponse.json({ error: error.message }, { status: 400 });
+
+  return NextResponse.json({ success: true });
+}

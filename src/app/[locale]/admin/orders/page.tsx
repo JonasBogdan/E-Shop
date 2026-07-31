@@ -7,6 +7,7 @@ import { AdminPagination } from "@/components/admin/pagination";
 import { Button } from "@/components/ui/button";
 import { formatPrice } from "@/lib/utils";
 import { AdminSearchInput } from "@/components/admin/search-input";
+import { DeleteOrderButton } from "@/components/admin/delete-order-button";
 
 const PAGE_SIZE = 20;
 
@@ -88,6 +89,7 @@ export default async function AdminOrdersPage({ params, searchParams }: Props) {
                     <Link href={`/admin/orders/${order.id}`}>
                       <Button variant="ghost" size="sm">View</Button>
                     </Link>
+                    <DeleteOrderButton orderId={order.id} />
                   </td>
                 </tr>
               ))}
