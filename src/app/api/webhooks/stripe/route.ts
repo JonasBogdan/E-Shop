@@ -105,10 +105,17 @@ export async function POST(req: NextRequest) {
 
         const { data: reclaimed } = await supabase
           .from("stripe_webhook_events")
-          .update({ status: "processing", error: null })
+          // Refresh processing_since so the lease window restarts from now.
+          // Without this, an event older than 10 min could be reclaimed on
+          // every Stripe retry even while a recent reclaim is still running.
+          .update({
+            status: "processing",
+            error: null,
+            processing_since: new Date().toISOString(),
+          })
           .eq("stripe_event_id", event.id)
           .or(
-            `status.eq.failed,and(status.eq.processing,created_at.lt.${leaseExpiry})`
+            `status.eq.failed,and(status.eq.processing,processing_since.lt.${leaseExpiry})`
           )
           .select("stripe_event_id, notifications_sent")
           .maybeSingle();

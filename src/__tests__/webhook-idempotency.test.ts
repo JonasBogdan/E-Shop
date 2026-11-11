@@ -78,8 +78,9 @@ describe("webhook event claim logic", () => {
   });
 
   it("proceeds when reclaiming a stale processing event (crash recovery)", () => {
-    // A processing row older than EVENT_LEASE_MINUTES is treated as failed.
-    // The reclaim UPDATE also matches stale 'processing' rows.
+    // The reclaim UPDATE filters on processing_since < leaseExpiry (not
+    // created_at) so the lease window restarts on each reclaim.  A fresh
+    // reclaim cannot itself be reclaimed until EVENT_LEASE_MINUTES pass.
     expect(
       resolveClaimOutcome(
         { error: { code: "23505", message: "duplicate" } },

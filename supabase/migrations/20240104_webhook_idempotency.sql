@@ -28,8 +28,19 @@ CREATE TABLE IF NOT EXISTS stripe_webhook_events (
   error               TEXT,
   -- TRUE once both notification emails (customer + admin) have been sent.
   -- Checked on retry so fulfilled orders do not receive duplicate emails.
+  -- TRUE once both notification emails (customer + admin) have been sent.
+  -- Checked on retry so fulfilled orders do not receive duplicate emails.
+  -- NOTE: a single boolean covers both emails; in the rare case where one
+  -- email succeeds and the other fails the whole batch is retried, so the
+  -- customer may receive a duplicate confirmation email.  This is an
+  -- accepted trade-off — adding per-email columns is out of Sprint 1 scope.
   notifications_sent  BOOLEAN     NOT NULL DEFAULT FALSE,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Refreshed to now() on every successful claim or reclaim so the lease
+  -- window is measured from the most recent processing attempt, not the
+  -- original INSERT.  Prevents an old event from being reclaimed while a
+  -- recent reclaim is still actively processing.
+  processing_since    TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at        TIMESTAMPTZ
 );
 
