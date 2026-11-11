@@ -218,7 +218,7 @@ export async function POST(req: NextRequest) {
       }
 
       // ── Fetch order + items (needed for email notifications) ───────────
-      const [{ data: order }, { data: orderItems }] = await Promise.all([
+      const [orderResult, itemsResult] = await Promise.all([
         supabase.from("orders").select("*").eq("id", orderId).single(),
         supabase.from("order_items").select("*").eq("order_id", orderId),
       ]);
@@ -231,7 +231,33 @@ export async function POST(req: NextRequest) {
       // row), we skip re-sending.
       //
       // On retry: fulfill_order returns 'already_fulfilled' — no double-decrement.
-      if (order && orderItems && !notificationsSentAlready) {
+      if (!notificationsSentAlready) {
+        // Guard: if either query failed or the order row is missing, we cannot
+        // build the notification email.  Mark failed and return 500 so Stripe
+        // retries.  Payment and inventory are already committed; only the
+        // notification is outstanding.
+        if (orderResult.error || !orderResult.data) {
+          const reason = orderResult.error?.message ?? "order row missing";
+          console.error("[webhook] failed to fetch order for notification:", reason);
+          await supabase
+            .from("stripe_webhook_events")
+            .update({ status: "failed", error: `Fetch order failed: ${reason}` })
+            .eq("stripe_event_id", event.id);
+          return NextResponse.json({ error: "Failed to fetch order" }, { status: 500 });
+        }
+
+        if (itemsResult.error) {
+          console.error("[webhook] failed to fetch order items for notification:", itemsResult.error);
+          await supabase
+            .from("stripe_webhook_events")
+            .update({ status: "failed", error: `Fetch items failed: ${itemsResult.error.message}` })
+            .eq("stripe_event_id", event.id);
+          return NextResponse.json({ error: "Failed to fetch order items" }, { status: 500 });
+        }
+
+        const order = orderResult.data;
+        const orderItems = itemsResult.data ?? [];
+
         const emailResults = await Promise.allSettled([
           sendOrderConfirmationEmail(order as Order, orderItems as OrderItem[]),
           sendAdminOrderNotificationEmail(order as Order, orderItems as OrderItem[]),
@@ -261,13 +287,30 @@ export async function POST(req: NextRequest) {
           );
         }
 
-        // Persist notifications_sent before the completion update so that if
-        // the completion write fails (edge case), a future retry sees
-        // notifications_sent=true and skips re-sending.
-        await supabase
+        // Persist notifications_sent BEFORE the completion update.  If the
+        // completion write fails (edge case), a future retry reclaims the event,
+        // sees notifications_sent=true, and skips re-sending — preventing
+        // duplicate emails even though the event was not marked completed.
+        const { error: notifUpdateError } = await supabase
           .from("stripe_webhook_events")
           .update({ notifications_sent: true })
           .eq("stripe_event_id", event.id);
+
+        if (notifUpdateError) {
+          console.error("[webhook] failed to persist notifications_sent:", notifUpdateError);
+          await supabase
+            .from("stripe_webhook_events")
+            .update({ status: "failed", error: `DB error persisting notification status: ${notifUpdateError.message}` })
+            .eq("stripe_event_id", event.id);
+          // Return 500 so Stripe retries.  On retry: notifications_sent is
+          // still false so emails are re-sent (possible duplicate, but better
+          // than losing the notification).  fulfill_order returns
+          // 'already_fulfilled' — no double stock decrement.
+          return NextResponse.json(
+            { error: "DB error persisting notification status" },
+            { status: 500 }
+          );
+        }
       }
 
       // ── Mark event completed ─────────────────────────────────────────────
@@ -279,22 +322,26 @@ export async function POST(req: NextRequest) {
           completed_at: new Date().toISOString(),
         })
         .eq("stripe_event_id", event.id);
+
       if (completeError) {
-        // Non-fatal: payment and stock are committed, emails are sent.
-        // The event record is just not marked complete — log and continue.
         console.error("[webhook] failed to mark event as completed:", completeError);
+        // Return 500 so Stripe retries.  On retry: notifications_sent=true
+        // means emails are skipped; fulfill_order returns 'already_fulfilled'.
+        // The retry's only job is to mark the event completed.
+        return NextResponse.json({ error: "DB error completing event" }, { status: 500 });
       }
 
       // ── Low-stock alerts — fire-and-forget, only on first fulfillment ────
-      if (orderItems && orderItems.length > 0 && fulfillResult === "fulfilled") {
-        const regularProductIds = orderItems
+      const allOrderItems = itemsResult.data ?? [];
+      if (allOrderItems.length > 0 && fulfillResult === "fulfilled") {
+        const regularProductIds = allOrderItems
           .filter(
             (item: { variant_id: string | null; product_id: string | null }) =>
               !item.variant_id && item.product_id
           )
           .map((item: { product_id: string | null }) => item.product_id as string);
 
-        const variantIds = orderItems
+        const variantIds = allOrderItems
           .filter((item: { variant_id: string | null }) => item.variant_id)
           .map((item: { variant_id: string | null }) => item.variant_id as string);
 

@@ -55,15 +55,25 @@ Expected result: no errors; tables `orders`, `order_items`, `coupons`, `profiles
 ```
 supabase/migrations/20240104_webhook_idempotency.sql
 ```
-Expected result: no errors; `stripe_webhook_events` table exists; `fulfill_order` function exists and is callable with `SELECT fulfill_order(gen_random_uuid(), null);` returning an error about order not found (not a permission error).
+Expected result: no errors; `stripe_webhook_events` table exists; `fulfill_order` function exists.
 
-**Verify function permission:**
+**Verify function permission (permissions check only — not a fulfillment test):**
 ```sql
--- Run as postgres role (SQL Editor default):
+-- Run as postgres role (Supabase SQL Editor default):
 SELECT routine_name, privilege_type, grantee
 FROM information_schema.role_routine_grants
 WHERE routine_name = 'fulfill_order';
--- Should show service_role with EXECUTE.
+-- Must show a row: grantee='service_role', privilege_type='EXECUTE'.
+-- If no row appears, the GRANT was not applied — re-run the migration.
+```
+
+```sql
+-- Confirm the function raises a permission error as anon (not a syntax error):
+-- This call intentionally raises "Order <uuid> not found" — that is correct.
+-- A "permission denied" error instead means the GRANT is missing.
+SELECT fulfill_order(gen_random_uuid(), null);
+-- Expected: ERROR: Order <uuid> not found
+-- NOT expected: ERROR: permission denied for function fulfill_order
 ```
 
 ---
@@ -87,19 +97,77 @@ If the production webhook URL changed, update it in the Stripe Dashboard:
 
 ---
 
-## Step 5 — Smoke test with a live order
+## Step 5 — Staging end-to-end test (before production)
 
-1. Place a real order through the shop using a low-cost item (or a test coupon for 100% off if available).
-2. Complete payment with a real card in Stripe live mode.
-3. Verify in Supabase:
-   ```sql
-   SELECT status, notifications_sent, completed_at
-   FROM stripe_webhook_events
-   ORDER BY created_at DESC LIMIT 5;
-   -- Expect: status='completed', notifications_sent=true
-   ```
-4. Verify order `fulfillment_status = 'fulfilled'` in `orders` table.
-5. Confirm customer confirmation email and admin notification email were received.
+Run this against the staging environment (Vercel preview + staging Supabase), using
+Stripe test-mode keys and a Stripe test card (e.g. `4242 4242 4242 4242`).
+
+**Before placing the test order — record baseline stock:**
+```sql
+-- Replace with the actual product or variant IDs you will order.
+SELECT id, name_en, stock FROM products WHERE id = '<your-test-product-id>';
+-- or for a variant:
+SELECT id, name, stock FROM product_variants WHERE id = '<your-test-variant-id>';
+-- If using a coupon:
+SELECT code, uses_count FROM coupons WHERE code = '<your-test-coupon-code>';
+```
+
+**Place the test order** through the staging shop UI and complete payment.
+
+**After the webhook fires — verify all six conditions:**
+
+```sql
+-- 1. Payment recorded and webhook event completed
+SELECT o.id, o.status, o.fulfillment_status,
+       e.status AS event_status, e.notifications_sent, e.completed_at
+FROM orders o
+JOIN stripe_webhook_events e ON e.order_id = o.id
+ORDER BY o.created_at DESC LIMIT 1;
+-- Expected: o.status='paid', o.fulfillment_status='fulfilled',
+--           e.status='completed', e.notifications_sent=true,
+--           e.completed_at IS NOT NULL
+```
+
+```sql
+-- 2. Inventory decremented exactly once
+SELECT id, name_en, stock FROM products WHERE id = '<your-test-product-id>';
+-- Expected: stock = baseline_stock - ordered_quantity (exactly once)
+```
+
+```sql
+-- 3. Coupon usage updated (skip if no coupon was used)
+SELECT code, uses_count FROM coupons WHERE code = '<your-test-coupon-code>';
+-- Expected: uses_count = baseline_uses_count + 1
+```
+
+**4. Emails received** — check the customer inbox for the confirmation email and
+the admin inbox (`mesku.maistas@gmail.com`) for the new-order notification.
+
+**5. Idempotency — replay the same Stripe event to confirm no double-decrement:**
+
+In the Stripe test-mode Dashboard → Developers → Webhooks → select the
+`checkout.session.completed` event → click **Resend**. Then re-run the stock query.
+
+```sql
+-- Stock must be unchanged from step 2 (no second decrement)
+SELECT id, name_en, stock FROM products WHERE id = '<your-test-product-id>';
+
+-- Webhook event must remain 'completed' (not reprocessed)
+SELECT status, notifications_sent FROM stripe_webhook_events
+WHERE order_id = (SELECT id FROM orders ORDER BY created_at DESC LIMIT 1);
+-- Expected: status='completed' (unchanged), notifications_sent=true
+```
+
+---
+
+## Step 6 — Smoke test with a live order (production)
+
+After staging passes, repeat with a real payment in production:
+
+1. Place a real order through the live shop using a low-cost item.
+2. Complete payment with a real card.
+3. Run the same SQL queries above against the production Supabase project.
+4. Confirm customer confirmation email and admin notification email were received.
 
 ---
 
