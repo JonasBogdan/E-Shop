@@ -1,5 +1,24 @@
 import { NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+
+async function verifyAdmin() {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return null;
+
+  const adminSupabase = createAdminClient();
+  const { data: profile } = await adminSupabase
+    .from("profiles")
+    .select("role")
+    .eq("id", user.id)
+    .single();
+
+  if (profile?.role !== "admin") return null;
+  return user;
+}
 
 // ── Background job state (module-level, survives across requests) ──────────
 type JobState = {
@@ -284,6 +303,9 @@ async function runImport() {
 
 // GET — returns current job status as JSON
 export async function GET() {
+  const user = await verifyAdmin();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
   return NextResponse.json({
     running: job.running,
     done: job.done,
@@ -298,6 +320,10 @@ export async function GET() {
 // PUT — move products matching a name filter to a target category
 // Body: { nameContains: string, categorySlug: string }
 export async function PUT(req: Request) {
+  const user = await verifyAdmin();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+
   const { nameContains, categorySlug } = await req.json();
   if (!nameContains || !categorySlug) {
     return NextResponse.json({ error: "nameContains and categorySlug are required" }, { status: 400 });
@@ -330,6 +356,9 @@ export async function PUT(req: Request) {
 
 // POST — starts the import in the background (idempotent: ignores if already running)
 export async function POST() {
+  const user = await verifyAdmin();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
   if (job.running) {
     return NextResponse.json({ started: false, reason: "Already running" });
   }

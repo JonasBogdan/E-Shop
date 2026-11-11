@@ -12,6 +12,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No items" }, { status: 400 });
     }
 
+    // Validate quantities
+    for (const item of items as Array<{ quantity: unknown }>) {
+      const q = item.quantity;
+      if (!Number.isInteger(q) || (q as number) < 1) {
+        return NextResponse.json({ error: "Invalid item quantity" }, { status: 400 });
+      }
+    }
+
+    // Validate locale — only accept known locales, fall back to default
+    const VALID_LOCALES = ["en", "lt"];
+    const safeLocale = VALID_LOCALES.includes(locale) ? locale : "lt";
+
     if (!process.env.STRIPE_SECRET_KEY) {
       return NextResponse.json(
         { error: "Stripe not configured. Please set STRIPE_SECRET_KEY." },
@@ -302,23 +314,35 @@ export async function POST(req: NextRequest) {
       .select("id")
       .single();
 
-    if (orderError) {
+    if (orderError || !order) {
       console.error("Order creation error:", orderError);
+      return NextResponse.json(
+        { error: "Failed to create order. Please try again." },
+        { status: 500 }
+      );
     }
 
     // Insert order items (with variant_id and variant_name when applicable)
-    if (order) {
-      await adminSupabase.from("order_items").insert(
-        orderItems.map((item) => ({
-          order_id: order.id,
-          product_id: item.product_id,
-          variant_id: item.variant_id,
-          product_name: item.product_name,
-          variant_name: item.variant_name,
-          product_price: item.product_price,
-          quantity: item.quantity,
-          subtotal: item.subtotal,
-        }))
+    const { error: itemsError } = await adminSupabase.from("order_items").insert(
+      orderItems.map((item) => ({
+        order_id: order.id,
+        product_id: item.product_id,
+        variant_id: item.variant_id,
+        product_name: item.product_name,
+        variant_name: item.variant_name,
+        product_price: item.product_price,
+        quantity: item.quantity,
+        subtotal: item.subtotal,
+      }))
+    );
+
+    if (itemsError) {
+      console.error("Order items insertion error:", itemsError);
+      // Clean up the orphaned order before failing
+      await adminSupabase.from("orders").delete().eq("id", order.id);
+      return NextResponse.json(
+        { error: "Failed to save order items. Please try again." },
+        { status: 500 }
       );
     }
 
@@ -331,15 +355,15 @@ export async function POST(req: NextRequest) {
         ? { discounts: [{ coupon: stripeCouponId }] }
         : {}),
       metadata: {
-        ...(order ? { order_id: order.id } : {}),
+        order_id: order.id,
         ...(validatedCouponCode ? { coupon_code: validatedCouponCode } : {}),
       },
       customer_email: customerInfo.email,
-      success_url: `${siteUrl}/${locale}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${siteUrl}/${locale}/cart`,
+      success_url: `${siteUrl}/${safeLocale}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${siteUrl}/${safeLocale}/cart`,
     });
 
-    if (order && session.id) {
+    if (session.id) {
       await adminSupabase
         .from("orders")
         .update({ stripe_session_id: session.id })

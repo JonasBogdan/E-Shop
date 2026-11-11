@@ -50,15 +50,22 @@ export async function POST(req: NextRequest) {
       const couponCode = session.metadata?.coupon_code;
 
       if (orderId) {
-        // Update order status to paid
-        await supabase
+        // Atomic conditional update — only transitions from non-paid states.
+        // If 0 rows are returned, this event was already processed; skip to avoid
+        // double stock decrements, double coupon increments, and duplicate emails.
+        const { data: updatedOrder } = await supabase
           .from("orders")
           .update({
             status: "paid",
             stripe_payment_intent_id: session.payment_intent as string,
             updated_at: new Date().toISOString(),
           })
-          .eq("id", orderId);
+          .eq("id", orderId)
+          .neq("status", "paid")
+          .select("id")
+          .maybeSingle();
+
+        if (!updatedOrder) break; // already processed
 
         // Fetch full order + items
         const [{ data: order }, { data: orderItems }] = await Promise.all([
