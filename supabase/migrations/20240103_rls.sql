@@ -4,28 +4,38 @@
 -- bypasses RLS, so enabling these policies will NOT break any existing
 -- API routes, webhooks, or admin pages.
 --
+-- Prerequisites: run as a database superuser (e.g. postgres role in Supabase SQL Editor).
+--
 -- Rollback script (run to undo):
+--   REVOKE EXECUTE ON FUNCTION current_user_profile_role() FROM authenticated;
 --   DROP FUNCTION IF EXISTS current_user_profile_role();
---   ALTER TABLE orders DISABLE ROW LEVEL SECURITY;
+--   DROP POLICY IF EXISTS "users_read_own_orders"       ON orders;
+--   DROP POLICY IF EXISTS "users_read_own_order_items"  ON order_items;
+--   DROP POLICY IF EXISTS "users_read_own_profile"      ON profiles;
+--   DROP POLICY IF EXISTS "users_update_own_profile"    ON profiles;
+--   ALTER TABLE orders      DISABLE ROW LEVEL SECURITY;
 --   ALTER TABLE order_items DISABLE ROW LEVEL SECURITY;
---   ALTER TABLE coupons DISABLE ROW LEVEL SECURITY;
---   ALTER TABLE profiles DISABLE ROW LEVEL SECURITY;
---   DROP POLICY IF EXISTS "users_read_own_orders" ON orders;
---   DROP POLICY IF EXISTS "users_read_own_order_items" ON order_items;
---   DROP POLICY IF EXISTS "users_read_own_profile" ON profiles;
---   DROP POLICY IF EXISTS "users_update_own_profile" ON profiles;
+--   ALTER TABLE coupons     DISABLE ROW LEVEL SECURITY;
+--   ALTER TABLE profiles    DISABLE ROW LEVEL SECURITY;
 
 -- ── Helper: read own role without recursive RLS evaluation ────────────────
--- WITH CHECK on profiles cannot query profiles directly (causes recursion).
--- SECURITY DEFINER bypasses RLS so this reads the current DB row safely.
+-- WITH CHECK on profiles cannot query profiles directly — it causes recursive
+-- RLS evaluation.  SECURITY DEFINER with an explicit search_path bypasses RLS
+-- and prevents search_path injection.
+-- Owned by the postgres superuser; only authenticated may call it.
 CREATE OR REPLACE FUNCTION current_user_profile_role()
 RETURNS TEXT
 LANGUAGE SQL
 SECURITY DEFINER
 STABLE
+SET search_path = public, pg_temp
 AS $$
   SELECT role FROM profiles WHERE id = auth.uid();
 $$;
+
+-- Remove the default PUBLIC execute privilege, then grant only to authenticated.
+REVOKE ALL    ON FUNCTION current_user_profile_role() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION current_user_profile_role() TO authenticated;
 
 -- ── orders ────────────────────────────────────────────────────────────────
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;

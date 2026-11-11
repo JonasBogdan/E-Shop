@@ -1,7 +1,9 @@
 -- Webhook idempotency and atomic fulfillment
 -- ⚠️  REVIEW BEFORE APPLYING. Run after 20240103_rls.sql.
+-- Prerequisites: run as a database superuser in Supabase SQL Editor.
 --
 -- Rollback:
+--   REVOKE ALL ON FUNCTION fulfill_order(UUID, TEXT) FROM PUBLIC;
 --   DROP FUNCTION IF EXISTS fulfill_order(UUID, TEXT);
 --   DROP TABLE IF EXISTS stripe_webhook_events;
 --   ALTER TABLE orders DROP COLUMN IF EXISTS fulfillment_status;
@@ -12,6 +14,10 @@
 --   processing  — claimed; work is in progress (or process crashed mid-flight)
 --   completed   — all side-effects applied successfully
 --   failed      — work failed; a later Stripe retry may re-claim this row
+--
+-- Crash recovery: the TypeScript webhook handler re-claims 'processing' rows
+-- whose created_at is older than 10 minutes (lease timeout), treating them as
+-- if they were 'failed' so the next Stripe delivery can retry them.
 CREATE TABLE IF NOT EXISTS stripe_webhook_events (
   stripe_event_id  TEXT        PRIMARY KEY,
   event_type       TEXT        NOT NULL,
@@ -28,9 +34,14 @@ ALTER TABLE stripe_webhook_events ENABLE ROW LEVEL SECURITY;
 -- No policies for anon/authenticated — only service role may access.
 
 -- ── 2. Fulfillment status on orders ──────────────────────────────────────
--- Separates "has the customer paid?" from "has stock been decremented?".
+-- Separates "has the customer paid?" from "has inventory been decremented?".
 -- Without this, the event-claim lock is the only guard against double work.
 -- With it, fulfill_order is idempotent even if the event record is lost.
+--
+-- NOTE: 'fulfilled' here means inventory has been decremented — it does NOT
+-- mean the parcel has been physically dispatched to the customer.  Physical
+-- dispatch is tracked via the separate orders.status field ('shipped',
+-- 'delivered') which the admin updates manually.
 ALTER TABLE orders
   ADD COLUMN IF NOT EXISTS fulfillment_status TEXT NOT NULL DEFAULT 'pending'
   CHECK (fulfillment_status IN ('pending', 'fulfilled'));
@@ -40,10 +51,24 @@ ALTER TABLE orders
 -- in a single transaction protected by a row-level lock on the order.
 --
 -- Returns:
---   'fulfilled'          — work was done in this call
+--   'fulfilled'          — inventory decremented successfully in this call
 --   'already_fulfilled'  — idempotent skip; a prior call already did it
 --
--- Raises an exception on any error, causing the caller to roll back.
+-- Raises an exception on any error (including insufficient stock), causing
+-- the caller to roll back ALL changes in this call so none are partially
+-- applied.  The webhook handler catches this, marks the event 'failed', and
+-- returns HTTP 500 so Stripe retries.
+--
+-- Insufficient stock policy: if stock < quantity for any item, the entire
+-- fulfillment is aborted.  The order remains in fulfillment_status='pending'.
+-- An admin must resolve the inventory shortfall manually (re-stock, refund,
+-- or partial fulfilment) — no automatic cancellation or refund is performed.
+--
+-- Security:
+--   SECURITY DEFINER — runs as the function owner (postgres), bypassing RLS.
+--   SET search_path  — prevents search_path injection attacks.
+--   EXECUTE revoked from PUBLIC, not granted to anon/authenticated; only
+--   service_role (which bypasses all grants) may call this via supabase.rpc().
 CREATE OR REPLACE FUNCTION fulfill_order(
   p_order_id    UUID,
   p_coupon_code TEXT DEFAULT NULL
@@ -51,14 +76,16 @@ CREATE OR REPLACE FUNCTION fulfill_order(
 RETURNS TEXT
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_fulfillment_status TEXT;
   v_item               RECORD;
+  v_rows_updated       INTEGER;
 BEGIN
   -- Lock the order row to serialise concurrent webhook deliveries.
-  -- Any second call with the same order_id will block here until the
-  -- first transaction commits, then see fulfillment_status = 'fulfilled'.
+  -- A second concurrent call blocks here until the first transaction commits,
+  -- then observes fulfillment_status = 'fulfilled' and returns 'already_fulfilled'.
   SELECT fulfillment_status
   INTO   v_fulfillment_status
   FROM   orders
@@ -73,7 +100,10 @@ BEGIN
     RETURN 'already_fulfilled';
   END IF;
 
-  -- Decrement stock for every order item
+  -- Decrement stock for every order item.
+  -- Each UPDATE includes stock >= quantity so it only succeeds when there is
+  -- sufficient inventory.  GET DIAGNOSTICS catches the case where the product
+  -- row was not found OR stock was insufficient — both fail identically here.
   FOR v_item IN
     SELECT variant_id, product_id, quantity
     FROM   order_items
@@ -81,14 +111,31 @@ BEGIN
   LOOP
     IF v_item.variant_id IS NOT NULL THEN
       UPDATE product_variants
-      SET    stock      = GREATEST(0, stock - v_item.quantity),
+      SET    stock      = stock - v_item.quantity,
              updated_at = NOW()
-      WHERE  id = v_item.variant_id;
+      WHERE  id    = v_item.variant_id
+        AND  stock >= v_item.quantity;
+
+      GET DIAGNOSTICS v_rows_updated = ROW_COUNT;
+      IF v_rows_updated = 0 THEN
+        RAISE EXCEPTION
+          'Insufficient stock or missing variant % (qty requested: %)',
+          v_item.variant_id, v_item.quantity;
+      END IF;
+
     ELSIF v_item.product_id IS NOT NULL THEN
       UPDATE products
-      SET    stock      = GREATEST(0, stock - v_item.quantity),
+      SET    stock      = stock - v_item.quantity,
              updated_at = NOW()
-      WHERE  id = v_item.product_id;
+      WHERE  id    = v_item.product_id
+        AND  stock >= v_item.quantity;
+
+      GET DIAGNOSTICS v_rows_updated = ROW_COUNT;
+      IF v_rows_updated = 0 THEN
+        RAISE EXCEPTION
+          'Insufficient stock or missing product % (qty requested: %)',
+          v_item.product_id, v_item.quantity;
+      END IF;
     END IF;
   END LOOP;
 
@@ -100,7 +147,7 @@ BEGIN
     WHERE  code = p_coupon_code;
   END IF;
 
-  -- Mark the order as fulfilled
+  -- Mark the order's inventory as decremented
   UPDATE orders
   SET    fulfillment_status = 'fulfilled',
          updated_at         = NOW()
@@ -109,3 +156,6 @@ BEGIN
   RETURN 'fulfilled';
 END;
 $$;
+
+-- Revoke default PUBLIC execute; service_role bypasses this via superuser privilege.
+REVOKE ALL ON FUNCTION fulfill_order(UUID, TEXT) FROM PUBLIC;

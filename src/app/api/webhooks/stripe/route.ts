@@ -9,6 +9,9 @@ import {
 import type { Order, OrderItem } from "@/types";
 
 const LOW_STOCK_THRESHOLD = 5;
+// If a 'processing' event is older than this, the handler that claimed it
+// is assumed to have crashed and the next delivery may reclaim it.
+const EVENT_LEASE_MINUTES = 10;
 
 export async function POST(req: NextRequest) {
   if (!process.env.STRIPE_SECRET_KEY || !process.env.STRIPE_WEBHOOK_SECRET) {
@@ -55,17 +58,27 @@ export async function POST(req: NextRequest) {
         break;
       }
 
+      // Guard: only process EUR payments (this shop's only currency)
+      if (session.currency !== "eur") {
+        console.warn(`[webhook] unexpected currency ${session.currency} — skipping`);
+        break;
+      }
+
       const orderId = session.metadata?.order_id;
       const couponCode = session.metadata?.coupon_code ?? null;
 
-      if (!orderId) break;
+      if (!orderId) {
+        console.warn("[webhook] completed session has no order_id in metadata");
+        break;
+      }
 
       // ── Claim this event ────────────────────────────────────────────────
       // INSERT succeeds exactly once per stripe_event_id (PRIMARY KEY).
-      // On conflict, we check the existing status:
-      //   completed  → already processed, acknowledge and skip
-      //   processing → concurrent delivery, skip
-      //   failed     → prior attempt failed, re-claim for retry
+      // On conflict we try to re-claim:
+      //   failed              → re-claim unconditionally (previous attempt failed)
+      //   processing + stale  → re-claim (crashed handler; lease expired)
+      //   processing + fresh  → skip (concurrent delivery in progress)
+      //   completed           → skip (already processed)
       const { error: insertError } = await supabase
         .from("stripe_webhook_events")
         .insert({
@@ -76,28 +89,67 @@ export async function POST(req: NextRequest) {
 
       if (insertError) {
         if (insertError.code !== "23505") {
-          // Unexpected DB error — fail so Stripe retries
           console.error("[webhook] failed to claim event:", insertError);
           return NextResponse.json({ error: "Internal error" }, { status: 500 });
         }
 
-        // Unique constraint hit. Try to re-claim only if the previous attempt failed.
+        // Unique violation — try to reclaim if failed OR if the processing
+        // lease has expired (crash recovery).
+        const leaseExpiry = new Date(
+          Date.now() - EVENT_LEASE_MINUTES * 60 * 1000
+        ).toISOString();
+
         const { data: reclaimed } = await supabase
           .from("stripe_webhook_events")
           .update({ status: "processing", error: null })
           .eq("stripe_event_id", event.id)
-          .eq("status", "failed")
+          .or(
+            `status.eq.failed,and(status.eq.processing,created_at.lt.${leaseExpiry})`
+          )
           .select("stripe_event_id")
           .maybeSingle();
 
         if (!reclaimed) {
-          // Event is either 'completed' (done) or 'processing' (concurrent delivery) — skip
           console.log(
             `[webhook] event ${event.id} already claimed or completed — skipping`
           );
           break;
         }
-        console.log(`[webhook] retrying previously failed event ${event.id}`);
+        console.log(`[webhook] reclaimed event ${event.id}`);
+      }
+
+      // ── Verify this session belongs to the claimed order ────────────────
+      // Fetched here (not later) so we can validate before writing anything.
+      const { data: orderForVerification } = await supabase
+        .from("orders")
+        .select("id, stripe_session_id, status, fulfillment_status")
+        .eq("id", orderId)
+        .maybeSingle();
+
+      if (!orderForVerification) {
+        console.error(`[webhook] order ${orderId} not found`);
+        await supabase
+          .from("stripe_webhook_events")
+          .update({ status: "failed", error: "Order not found" })
+          .eq("stripe_event_id", event.id);
+        return NextResponse.json({ error: "Order not found" }, { status: 500 });
+      }
+
+      // If stripe_session_id is set, it must match.  A null means the checkout
+      // route's non-fatal session-link update failed; we allow that case.
+      if (
+        orderForVerification.stripe_session_id !== null &&
+        orderForVerification.stripe_session_id !== session.id
+      ) {
+        console.error(
+          `[webhook] session ID mismatch for order ${orderId}: ` +
+          `stored=${orderForVerification.stripe_session_id}, event=${session.id}`
+        );
+        await supabase
+          .from("stripe_webhook_events")
+          .update({ status: "failed", error: "Session ID mismatch" })
+          .eq("stripe_event_id", event.id);
+        return NextResponse.json({ error: "Session mismatch" }, { status: 500 });
       }
 
       // ── Update payment status ───────────────────────────────────────────
@@ -120,9 +172,14 @@ export async function POST(req: NextRequest) {
       }
 
       // ── Atomic fulfillment (stock + coupon) ────────────────────────────
-      // fulfill_order locks the order row, decrements stock for every item,
-      // increments coupon usage, and marks fulfillment_status = 'fulfilled'.
-      // If the order is already fulfilled it returns 'already_fulfilled' (safe).
+      // fulfill_order() locks the order row, checks stock >= quantity for every
+      // item (raises an exception if insufficient — rolls back all changes),
+      // decrements stock, increments coupon usage, and sets
+      // fulfillment_status = 'fulfilled'.
+      //
+      // 'fulfilled' here means inventory has been decremented.  It does NOT
+      // mean the parcel has been physically dispatched — that is tracked
+      // separately by orders.status ('shipped', 'delivered').
       const { data: fulfillResult, error: fulfillError } = await supabase.rpc(
         "fulfill_order",
         {
@@ -137,14 +194,21 @@ export async function POST(req: NextRequest) {
           .from("stripe_webhook_events")
           .update({ status: "failed", error: fulfillError.message })
           .eq("stripe_event_id", event.id);
+        // Return 500 so Stripe retries.  If this is a genuine stock insufficiency
+        // the event will stay 'failed' and an admin must resolve it manually.
         return NextResponse.json({ error: "Fulfillment failed" }, { status: 500 });
       }
 
       // ── Mark event as completed ─────────────────────────────────────────
-      await supabase
+      const { error: completeError } = await supabase
         .from("stripe_webhook_events")
         .update({ status: "completed", completed_at: new Date().toISOString() })
         .eq("stripe_event_id", event.id);
+      if (completeError) {
+        // Non-fatal: payment is recorded and stock is decremented.
+        // The event record is just not marked complete — log and continue.
+        console.error("[webhook] failed to mark event as completed:", completeError);
+      }
 
       // ── Fetch order + items for emails and low-stock alerts ─────────────
       const [{ data: order }, { data: orderItems }] = await Promise.all([
@@ -152,7 +216,7 @@ export async function POST(req: NextRequest) {
         supabase.from("order_items").select("*").eq("order_id", orderId),
       ]);
 
-      // Low-stock alerts — only on first fulfillment to avoid repeat alerts
+      // Low-stock alerts — fire-and-forget, only on first fulfillment
       if (orderItems && orderItems.length > 0 && fulfillResult === "fulfilled") {
         const regularProductIds = orderItems
           .filter(
@@ -162,9 +226,7 @@ export async function POST(req: NextRequest) {
           .map((item: { product_id: string | null }) => item.product_id as string);
 
         const variantIds = orderItems
-          .filter(
-            (item: { variant_id: string | null }) => item.variant_id
-          )
+          .filter((item: { variant_id: string | null }) => item.variant_id)
           .map((item: { variant_id: string | null }) => item.variant_id as string);
 
         if (regularProductIds.length > 0) {
@@ -205,18 +267,22 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Emails — fire-and-forget; failures are logged but do not block the webhook
+      // ── Send emails — awaited to complete before the invocation ends ─────
+      // Payment and inventory are already committed at this point, so email
+      // failures do not affect order state.  Retrying a failed event will NOT
+      // trigger another stock decrement (fulfill_order returns 'already_fulfilled').
       if (order && orderItems) {
-        Promise.allSettled([
+        const emailResults = await Promise.allSettled([
           sendOrderConfirmationEmail(order as Order, orderItems as OrderItem[]),
           sendAdminOrderNotificationEmail(order as Order, orderItems as OrderItem[]),
-        ]).then((results) => {
-          const labels = ["confirmation", "admin"];
-          results.forEach((r, i) => {
-            if (r.status === "rejected") {
-              console.error(`[webhook] email ${labels[i]} failed:`, r.reason);
-            }
-          });
+        ]);
+        const labels = ["confirmation", "admin (mesku.maistas@gmail.com)"];
+        emailResults.forEach((r, i) => {
+          if (r.status === "rejected") {
+            console.error(`[webhook] email ${labels[i]} failed:`, r.reason);
+          } else {
+            console.log(`[webhook] email ${labels[i]} sent`);
+          }
         });
       }
 
