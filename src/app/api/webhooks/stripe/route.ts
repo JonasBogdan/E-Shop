@@ -46,118 +46,180 @@ export async function POST(req: NextRequest) {
   switch (event.type) {
     case "checkout.session.completed": {
       const session = event.data.object as Stripe.Checkout.Session;
-      const orderId = session.metadata?.order_id;
-      const couponCode = session.metadata?.coupon_code;
 
-      if (orderId) {
-        // Atomic conditional update — only transitions from non-paid states.
-        // If 0 rows are returned, this event was already processed; skip to avoid
-        // double stock decrements, double coupon increments, and duplicate emails.
-        const { data: updatedOrder } = await supabase
-          .from("orders")
-          .update({
-            status: "paid",
-            stripe_payment_intent_id: session.payment_intent as string,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", orderId)
-          .neq("status", "paid")
-          .select("id")
+      // Guard: only process sessions that were actually paid
+      if (session.payment_status !== "paid") {
+        console.warn(
+          `[webhook] session ${session.id} completed but payment_status=${session.payment_status} — skipping`
+        );
+        break;
+      }
+
+      const orderId = session.metadata?.order_id;
+      const couponCode = session.metadata?.coupon_code ?? null;
+
+      if (!orderId) break;
+
+      // ── Claim this event ────────────────────────────────────────────────
+      // INSERT succeeds exactly once per stripe_event_id (PRIMARY KEY).
+      // On conflict, we check the existing status:
+      //   completed  → already processed, acknowledge and skip
+      //   processing → concurrent delivery, skip
+      //   failed     → prior attempt failed, re-claim for retry
+      const { error: insertError } = await supabase
+        .from("stripe_webhook_events")
+        .insert({
+          stripe_event_id: event.id,
+          event_type: event.type,
+          order_id: orderId,
+        });
+
+      if (insertError) {
+        if (insertError.code !== "23505") {
+          // Unexpected DB error — fail so Stripe retries
+          console.error("[webhook] failed to claim event:", insertError);
+          return NextResponse.json({ error: "Internal error" }, { status: 500 });
+        }
+
+        // Unique constraint hit. Try to re-claim only if the previous attempt failed.
+        const { data: reclaimed } = await supabase
+          .from("stripe_webhook_events")
+          .update({ status: "processing", error: null })
+          .eq("stripe_event_id", event.id)
+          .eq("status", "failed")
+          .select("stripe_event_id")
           .maybeSingle();
 
-        if (!updatedOrder) break; // already processed
-
-        // Fetch full order + items
-        const [{ data: order }, { data: orderItems }] = await Promise.all([
-          supabase.from("orders").select("*").eq("id", orderId).single(),
-          supabase.from("order_items").select("*").eq("order_id", orderId),
-        ]);
-
-        // Decrement stock for each item
-        const decrementedProductIds: string[] = [];
-        if (orderItems) {
-          for (const item of orderItems) {
-            if (item.variant_id) {
-              // Variant item — decrement variant stock
-              await supabase.rpc("decrement_variant_stock", {
-                p_variant_id: item.variant_id,
-                p_quantity: item.quantity,
-              });
-            } else if (item.product_id) {
-              // Regular product item — decrement product stock
-              await supabase.rpc("decrement_stock", {
-                p_product_id: item.product_id,
-                p_quantity: item.quantity,
-              });
-              decrementedProductIds.push(item.product_id);
-            }
-          }
+        if (!reclaimed) {
+          // Event is either 'completed' (done) or 'processing' (concurrent delivery) — skip
+          console.log(
+            `[webhook] event ${event.id} already claimed or completed — skipping`
+          );
+          break;
         }
+        console.log(`[webhook] retrying previously failed event ${event.id}`);
+      }
 
-        // Check for low stock on regular products after decrements
-        if (decrementedProductIds.length > 0) {
-          const { data: updatedProducts } = await supabase
+      // ── Update payment status ───────────────────────────────────────────
+      const { error: paymentError } = await supabase
+        .from("orders")
+        .update({
+          status: "paid",
+          stripe_payment_intent_id: session.payment_intent as string,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", orderId);
+
+      if (paymentError) {
+        console.error("[webhook] failed to update order payment status:", paymentError);
+        await supabase
+          .from("stripe_webhook_events")
+          .update({ status: "failed", error: paymentError.message })
+          .eq("stripe_event_id", event.id);
+        return NextResponse.json({ error: "DB error" }, { status: 500 });
+      }
+
+      // ── Atomic fulfillment (stock + coupon) ────────────────────────────
+      // fulfill_order locks the order row, decrements stock for every item,
+      // increments coupon usage, and marks fulfillment_status = 'fulfilled'.
+      // If the order is already fulfilled it returns 'already_fulfilled' (safe).
+      const { data: fulfillResult, error: fulfillError } = await supabase.rpc(
+        "fulfill_order",
+        {
+          p_order_id: orderId,
+          p_coupon_code: couponCode,
+        }
+      );
+
+      if (fulfillError) {
+        console.error("[webhook] fulfill_order failed:", fulfillError);
+        await supabase
+          .from("stripe_webhook_events")
+          .update({ status: "failed", error: fulfillError.message })
+          .eq("stripe_event_id", event.id);
+        return NextResponse.json({ error: "Fulfillment failed" }, { status: 500 });
+      }
+
+      // ── Mark event as completed ─────────────────────────────────────────
+      await supabase
+        .from("stripe_webhook_events")
+        .update({ status: "completed", completed_at: new Date().toISOString() })
+        .eq("stripe_event_id", event.id);
+
+      // ── Fetch order + items for emails and low-stock alerts ─────────────
+      const [{ data: order }, { data: orderItems }] = await Promise.all([
+        supabase.from("orders").select("*").eq("id", orderId).single(),
+        supabase.from("order_items").select("*").eq("order_id", orderId),
+      ]);
+
+      // Low-stock alerts — only on first fulfillment to avoid repeat alerts
+      if (orderItems && orderItems.length > 0 && fulfillResult === "fulfilled") {
+        const regularProductIds = orderItems
+          .filter(
+            (item: { variant_id: string | null; product_id: string | null }) =>
+              !item.variant_id && item.product_id
+          )
+          .map((item: { product_id: string | null }) => item.product_id as string);
+
+        const variantIds = orderItems
+          .filter(
+            (item: { variant_id: string | null }) => item.variant_id
+          )
+          .map((item: { variant_id: string | null }) => item.variant_id as string);
+
+        if (regularProductIds.length > 0) {
+          supabase
             .from("products")
             .select("name_en, stock")
-            .in("id", decrementedProductIds)
-            .lte("stock", LOW_STOCK_THRESHOLD);
-
-          if (updatedProducts && updatedProducts.length > 0) {
-            sendLowStockAlertEmail(updatedProducts).catch((err) =>
-              console.error("[email] Low stock alert failed:", err)
-            );
-          }
+            .in("id", regularProductIds)
+            .lte("stock", LOW_STOCK_THRESHOLD)
+            .then(({ data: lowProducts }) => {
+              if (lowProducts && lowProducts.length > 0) {
+                sendLowStockAlertEmail(lowProducts).catch((err) =>
+                  console.error("[email] low stock alert failed:", err)
+                );
+              }
+            });
         }
 
-        // Check for low-stock variants after decrements
-        if (orderItems) {
-          const variantIds = orderItems
-            .map((item) => item.variant_id)
-            .filter(Boolean);
-
-          if (variantIds.length > 0) {
-            const { data: lowVariants } = await supabase
-              .from("product_variants")
-              .select("name, stock, products(name_en)")
-              .in("id", variantIds)
-              .lte("stock", LOW_STOCK_THRESHOLD);
-
-            if (lowVariants && lowVariants.length > 0) {
-              const alertItems = lowVariants.map((v) => ({
-                name_en: `${(v.products as unknown as { name_en: string } | null)?.name_en ?? "Product"} – ${v.name}`,
-                stock: v.stock,
-              }));
-              sendLowStockAlertEmail(alertItems).catch((err) =>
-                console.error("[email] Low variant stock alert failed:", err)
-              );
-            }
-          }
-        }
-
-        // Increment coupon usage if a coupon was applied
-        if (couponCode) {
-          const { data: coupon } = await supabase
-            .from("coupons")
-            .select("uses_count")
-            .eq("code", couponCode)
-            .single();
-
-          if (coupon) {
-            await supabase
-              .from("coupons")
-              .update({ uses_count: coupon.uses_count + 1 })
-              .eq("code", couponCode);
-          }
-        }
-
-        // Send emails — failures must not break the webhook
-        if (order && orderItems) {
-          await Promise.allSettled([
-            sendOrderConfirmationEmail(order as Order, orderItems as OrderItem[]),
-            sendAdminOrderNotificationEmail(order as Order, orderItems as OrderItem[]),
-          ]);
+        if (variantIds.length > 0) {
+          supabase
+            .from("product_variants")
+            .select("name, stock, products(name_en)")
+            .in("id", variantIds)
+            .lte("stock", LOW_STOCK_THRESHOLD)
+            .then(({ data: lowVariants }) => {
+              if (lowVariants && lowVariants.length > 0) {
+                const alertItems = lowVariants.map((v) => ({
+                  name_en: `${
+                    (v.products as unknown as { name_en: string } | null)
+                      ?.name_en ?? "Product"
+                  } – ${v.name}`,
+                  stock: v.stock,
+                }));
+                sendLowStockAlertEmail(alertItems).catch((err) =>
+                  console.error("[email] low variant stock alert failed:", err)
+                );
+              }
+            });
         }
       }
+
+      // Emails — fire-and-forget; failures are logged but do not block the webhook
+      if (order && orderItems) {
+        Promise.allSettled([
+          sendOrderConfirmationEmail(order as Order, orderItems as OrderItem[]),
+          sendAdminOrderNotificationEmail(order as Order, orderItems as OrderItem[]),
+        ]).then((results) => {
+          const labels = ["confirmation", "admin"];
+          results.forEach((r, i) => {
+            if (r.status === "rejected") {
+              console.error(`[webhook] email ${labels[i]} failed:`, r.reason);
+            }
+          });
+        });
+      }
+
       break;
     }
 
@@ -166,13 +228,16 @@ export async function POST(req: NextRequest) {
       const orderId = session.metadata?.order_id;
 
       if (orderId) {
+        // Guard: only cancel if still pending — do NOT overwrite a paid order.
+        // session.expired can be delivered after session.completed in rare cases.
         await supabase
           .from("orders")
           .update({
             status: "cancelled",
             updated_at: new Date().toISOString(),
           })
-          .eq("id", orderId);
+          .eq("id", orderId)
+          .eq("status", "pending");
       }
       break;
     }

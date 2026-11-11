@@ -2,12 +2,18 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-async function verifyAdmin() {
+// Returns a NextResponse error (401/403) or null when the caller is an admin.
+async function requireAdmin(): Promise<NextResponse | null> {
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) return null;
+  if (!user) {
+    return NextResponse.json(
+      { error: "Authentication required" },
+      { status: 401 }
+    );
+  }
 
   const adminSupabase = createAdminClient();
   const { data: profile } = await adminSupabase
@@ -16,8 +22,10 @@ async function verifyAdmin() {
     .eq("id", user.id)
     .single();
 
-  if (profile?.role !== "admin") return null;
-  return user;
+  if (profile?.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  return null;
 }
 
 // ── Background job state (module-level, survives across requests) ──────────
@@ -303,8 +311,8 @@ async function runImport() {
 
 // GET — returns current job status as JSON
 export async function GET() {
-  const user = await verifyAdmin();
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const authError = await requireAdmin();
+  if (authError) return authError;
 
   return NextResponse.json({
     running: job.running,
@@ -320,8 +328,8 @@ export async function GET() {
 // PUT — move products matching a name filter to a target category
 // Body: { nameContains: string, categorySlug: string }
 export async function PUT(req: Request) {
-  const user = await verifyAdmin();
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const authError = await requireAdmin();
+  if (authError) return authError;
 
 
   const { nameContains, categorySlug } = await req.json();
@@ -356,8 +364,8 @@ export async function PUT(req: Request) {
 
 // POST — starts the import in the background (idempotent: ignores if already running)
 export async function POST() {
-  const user = await verifyAdmin();
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const authError = await requireAdmin();
+  if (authError) return authError;
 
   if (job.running) {
     return NextResponse.json({ started: false, reason: "Already running" });

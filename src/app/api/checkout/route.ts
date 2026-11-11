@@ -2,27 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { validateCheckoutBody, normalizeLocale } from "@/lib/checkout-validation";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { items, customerInfo, couponCode, locale } = body;
 
-    if (!items || items.length === 0) {
-      return NextResponse.json({ error: "No items" }, { status: 400 });
+    const validationError = validateCheckoutBody({ items, customerInfo });
+    if (validationError) {
+      return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
-    // Validate quantities
-    for (const item of items as Array<{ quantity: unknown }>) {
-      const q = item.quantity;
-      if (!Number.isInteger(q) || (q as number) < 1) {
-        return NextResponse.json({ error: "Invalid item quantity" }, { status: 400 });
-      }
-    }
-
-    // Validate locale — only accept known locales, fall back to default
-    const VALID_LOCALES = ["en", "lt"];
-    const safeLocale = VALID_LOCALES.includes(locale) ? locale : "lt";
+    const safeLocale = normalizeLocale(locale);
 
     if (!process.env.STRIPE_SECRET_KEY) {
       return NextResponse.json(
@@ -73,7 +65,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Fetch variants for variant items
+    // Fetch variants for variant items — also verify the parent product is active
     const variantIds = variantItems.map(
       (item: { variantId: string }) => item.variantId
     );
@@ -82,9 +74,10 @@ export async function POST(req: NextRequest) {
         ? (
             await adminSupabase
               .from("product_variants")
-              .select("id, name, price, stock, product_id")
+              .select("id, name, price, stock, product_id, products!inner(is_active)")
               .in("id", variantIds)
               .eq("is_active", true)
+              .eq("products.is_active", true)
           ).data || []
         : [];
 
@@ -364,10 +357,14 @@ export async function POST(req: NextRequest) {
     });
 
     if (session.id) {
-      await adminSupabase
+      const { error: sessionLinkError } = await adminSupabase
         .from("orders")
         .update({ stripe_session_id: session.id })
         .eq("id", order.id);
+      if (sessionLinkError) {
+        // Non-fatal: order and Stripe session exist; the link is for reference only
+        console.error("[checkout] failed to link Stripe session to order:", sessionLinkError);
+      }
     }
 
     return NextResponse.json({ url: session.url });

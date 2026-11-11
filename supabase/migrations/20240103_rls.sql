@@ -3,19 +3,38 @@
 -- All server-side code uses the service role key (createAdminClient) which
 -- bypasses RLS, so enabling these policies will NOT break any existing
 -- API routes, webhooks, or admin pages.
--- The anon key (NEXT_PUBLIC_SUPABASE_ANON_KEY) is public, so without RLS
--- anyone can query orders and customer PII directly from the browser.
+--
+-- Rollback script (run to undo):
+--   DROP FUNCTION IF EXISTS current_user_profile_role();
+--   ALTER TABLE orders DISABLE ROW LEVEL SECURITY;
+--   ALTER TABLE order_items DISABLE ROW LEVEL SECURITY;
+--   ALTER TABLE coupons DISABLE ROW LEVEL SECURITY;
+--   ALTER TABLE profiles DISABLE ROW LEVEL SECURITY;
+--   DROP POLICY IF EXISTS "users_read_own_orders" ON orders;
+--   DROP POLICY IF EXISTS "users_read_own_order_items" ON order_items;
+--   DROP POLICY IF EXISTS "users_read_own_profile" ON profiles;
+--   DROP POLICY IF EXISTS "users_update_own_profile" ON profiles;
+
+-- ── Helper: read own role without recursive RLS evaluation ────────────────
+-- WITH CHECK on profiles cannot query profiles directly (causes recursion).
+-- SECURITY DEFINER bypasses RLS so this reads the current DB row safely.
+CREATE OR REPLACE FUNCTION current_user_profile_role()
+RETURNS TEXT
+LANGUAGE SQL
+SECURITY DEFINER
+STABLE
+AS $$
+  SELECT role FROM profiles WHERE id = auth.uid();
+$$;
 
 -- ── orders ────────────────────────────────────────────────────────────────
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 
--- Logged-in users can see their own orders only
+-- Logged-in users can read their own orders (user_id matches).
+-- Guest orders (user_id IS NULL) are only accessible via service role.
 CREATE POLICY "users_read_own_orders" ON orders
   FOR SELECT TO authenticated
   USING (user_id = auth.uid());
-
--- Guest orders (user_id IS NULL) are not readable via anon/authenticated key
--- — they are only accessible through server-side service role.
 
 -- ── order_items ───────────────────────────────────────────────────────────
 ALTER TABLE order_items ENABLE ROW LEVEL SECURITY;
@@ -29,7 +48,7 @@ CREATE POLICY "users_read_own_order_items" ON order_items
   );
 
 -- ── coupons ───────────────────────────────────────────────────────────────
--- Coupon codes must not be enumerable via the anon key (would expose all codes).
+-- Coupon codes must not be enumerable via the anon key.
 -- Validation goes through /api/coupons/validate (server-side only).
 ALTER TABLE coupons ENABLE ROW LEVEL SECURITY;
 -- No SELECT policy for anon or authenticated — service role bypasses this.
@@ -37,17 +56,20 @@ ALTER TABLE coupons ENABLE ROW LEVEL SECURITY;
 -- ── profiles ──────────────────────────────────────────────────────────────
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 
--- Users can read and update their own profile
+-- Users can read their own profile row
 CREATE POLICY "users_read_own_profile" ON profiles
   FOR SELECT TO authenticated
   USING (id = auth.uid());
 
--- Users can update their own profile but cannot change their own role
--- (prevents self-escalation to admin)
+-- Users can update their own profile but cannot change their role.
+-- current_user_profile_role() (SECURITY DEFINER) reads the existing role
+-- without triggering recursive RLS evaluation on this table.
 CREATE POLICY "users_update_own_profile" ON profiles
   FOR UPDATE TO authenticated
   USING (id = auth.uid())
   WITH CHECK (
     id = auth.uid()
-    AND role = (SELECT role FROM profiles WHERE id = auth.uid())
+    AND role = current_user_profile_role()
   );
+
+-- ── stripe_webhook_events is covered in 20240104_webhook_idempotency.sql ──
