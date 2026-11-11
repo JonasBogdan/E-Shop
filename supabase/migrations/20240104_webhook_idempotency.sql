@@ -7,6 +7,7 @@
 --   DROP FUNCTION IF EXISTS fulfill_order(UUID, TEXT);
 --   DROP TABLE IF EXISTS stripe_webhook_events;
 --   ALTER TABLE orders DROP COLUMN IF EXISTS fulfillment_status;
+--   (notifications_sent column drops with the table)
 
 -- ── 1. Event log ─────────────────────────────────────────────────────────
 -- Tracks each Stripe event exactly once via the PRIMARY KEY.
@@ -22,11 +23,14 @@ CREATE TABLE IF NOT EXISTS stripe_webhook_events (
   stripe_event_id  TEXT        PRIMARY KEY,
   event_type       TEXT        NOT NULL,
   order_id         UUID,
-  status           TEXT        NOT NULL DEFAULT 'processing'
-                               CHECK (status IN ('processing', 'completed', 'failed')),
-  error            TEXT,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  completed_at     TIMESTAMPTZ
+  status              TEXT        NOT NULL DEFAULT 'processing'
+                                  CHECK (status IN ('processing', 'completed', 'failed')),
+  error               TEXT,
+  -- TRUE once both notification emails (customer + admin) have been sent.
+  -- Checked on retry so fulfilled orders do not receive duplicate emails.
+  notifications_sent  BOOLEAN     NOT NULL DEFAULT FALSE,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at        TIMESTAMPTZ
 );
 
 -- Lock down with RLS (service role bypasses this automatically)
@@ -157,5 +161,8 @@ BEGIN
 END;
 $$;
 
--- Revoke default PUBLIC execute; service_role bypasses this via superuser privilege.
-REVOKE ALL ON FUNCTION fulfill_order(UUID, TEXT) FROM PUBLIC;
+-- Revoke the default PUBLIC execute privilege, then grant only to service_role.
+-- service_role is NOT a superuser in Supabase's PostgreSQL — it has BYPASSRLS
+-- but still needs an explicit GRANT to execute SECURITY DEFINER functions.
+REVOKE ALL    ON FUNCTION fulfill_order(UUID, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fulfill_order(UUID, TEXT) TO service_role;

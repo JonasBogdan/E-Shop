@@ -79,6 +79,10 @@ export async function POST(req: NextRequest) {
       //   processing + stale  → re-claim (crashed handler; lease expired)
       //   processing + fresh  → skip (concurrent delivery in progress)
       //   completed           → skip (already processed)
+      //
+      // notificationsSentAlready: set to true when reclaiming an event whose
+      // prior attempt already sent emails — prevents duplicate notifications.
+      let notificationsSentAlready = false;
       const { error: insertError } = await supabase
         .from("stripe_webhook_events")
         .insert({
@@ -106,7 +110,7 @@ export async function POST(req: NextRequest) {
           .or(
             `status.eq.failed,and(status.eq.processing,created_at.lt.${leaseExpiry})`
           )
-          .select("stripe_event_id")
+          .select("stripe_event_id, notifications_sent")
           .maybeSingle();
 
         if (!reclaimed) {
@@ -115,7 +119,14 @@ export async function POST(req: NextRequest) {
           );
           break;
         }
-        console.log(`[webhook] reclaimed event ${event.id}`);
+        // On retry: were notification emails already sent in the prior attempt?
+        // If so, skip them to avoid duplicates.
+        notificationsSentAlready =
+          (reclaimed as { stripe_event_id: string; notifications_sent: boolean | null })
+            .notifications_sent ?? false;
+        console.log(
+          `[webhook] reclaimed event ${event.id}, notifications_sent=${notificationsSentAlready}`
+        );
       }
 
       // ── Verify this session belongs to the claimed order ────────────────
@@ -199,24 +210,75 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "Fulfillment failed" }, { status: 500 });
       }
 
-      // ── Mark event as completed ─────────────────────────────────────────
-      const { error: completeError } = await supabase
-        .from("stripe_webhook_events")
-        .update({ status: "completed", completed_at: new Date().toISOString() })
-        .eq("stripe_event_id", event.id);
-      if (completeError) {
-        // Non-fatal: payment is recorded and stock is decremented.
-        // The event record is just not marked complete — log and continue.
-        console.error("[webhook] failed to mark event as completed:", completeError);
-      }
-
-      // ── Fetch order + items for emails and low-stock alerts ─────────────
+      // ── Fetch order + items (needed for email notifications) ───────────
       const [{ data: order }, { data: orderItems }] = await Promise.all([
         supabase.from("orders").select("*").eq("id", orderId).single(),
         supabase.from("order_items").select("*").eq("order_id", orderId),
       ]);
 
-      // Low-stock alerts — fire-and-forget, only on first fulfillment
+      // ── Send notification emails ─────────────────────────────────────────
+      // Emails are sent BEFORE marking the event completed so that a Stripe
+      // retry (triggered by returning 500 on email failure) will re-attempt
+      // delivery.  notificationsSentAlready prevents duplicate emails: if a
+      // prior attempt already sent them (notifications_sent=true in the event
+      // row), we skip re-sending.
+      //
+      // On retry: fulfill_order returns 'already_fulfilled' — no double-decrement.
+      if (order && orderItems && !notificationsSentAlready) {
+        const emailResults = await Promise.allSettled([
+          sendOrderConfirmationEmail(order as Order, orderItems as OrderItem[]),
+          sendAdminOrderNotificationEmail(order as Order, orderItems as OrderItem[]),
+        ]);
+        const labels = ["confirmation", "admin (mesku.maistas@gmail.com)"];
+        const anyFailed = emailResults.some((r) => r.status === "rejected");
+
+        emailResults.forEach((r, i) => {
+          if (r.status === "rejected") {
+            console.error(`[webhook] email ${labels[i]} failed:`, r.reason);
+          } else {
+            console.log(`[webhook] email ${labels[i]} sent`);
+          }
+        });
+
+        if (anyFailed) {
+          // Mark event failed so Stripe retries the whole handler.
+          // Payment and inventory are already committed — only emails failed.
+          // fulfill_order will return 'already_fulfilled' on the next attempt.
+          await supabase
+            .from("stripe_webhook_events")
+            .update({ status: "failed", error: "Email delivery failed" })
+            .eq("stripe_event_id", event.id);
+          return NextResponse.json(
+            { error: "Notification failed" },
+            { status: 500 }
+          );
+        }
+
+        // Persist notifications_sent before the completion update so that if
+        // the completion write fails (edge case), a future retry sees
+        // notifications_sent=true and skips re-sending.
+        await supabase
+          .from("stripe_webhook_events")
+          .update({ notifications_sent: true })
+          .eq("stripe_event_id", event.id);
+      }
+
+      // ── Mark event completed ─────────────────────────────────────────────
+      const { error: completeError } = await supabase
+        .from("stripe_webhook_events")
+        .update({
+          status: "completed",
+          notifications_sent: true,
+          completed_at: new Date().toISOString(),
+        })
+        .eq("stripe_event_id", event.id);
+      if (completeError) {
+        // Non-fatal: payment and stock are committed, emails are sent.
+        // The event record is just not marked complete — log and continue.
+        console.error("[webhook] failed to mark event as completed:", completeError);
+      }
+
+      // ── Low-stock alerts — fire-and-forget, only on first fulfillment ────
       if (orderItems && orderItems.length > 0 && fulfillResult === "fulfilled") {
         const regularProductIds = orderItems
           .filter(
@@ -265,25 +327,6 @@ export async function POST(req: NextRequest) {
               }
             });
         }
-      }
-
-      // ── Send emails — awaited to complete before the invocation ends ─────
-      // Payment and inventory are already committed at this point, so email
-      // failures do not affect order state.  Retrying a failed event will NOT
-      // trigger another stock decrement (fulfill_order returns 'already_fulfilled').
-      if (order && orderItems) {
-        const emailResults = await Promise.allSettled([
-          sendOrderConfirmationEmail(order as Order, orderItems as OrderItem[]),
-          sendAdminOrderNotificationEmail(order as Order, orderItems as OrderItem[]),
-        ]);
-        const labels = ["confirmation", "admin (mesku.maistas@gmail.com)"];
-        emailResults.forEach((r, i) => {
-          if (r.status === "rejected") {
-            console.error(`[webhook] email ${labels[i]} failed:`, r.reason);
-          } else {
-            console.log(`[webhook] email ${labels[i]} sent`);
-          }
-        });
       }
 
       break;

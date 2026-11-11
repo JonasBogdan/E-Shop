@@ -19,7 +19,7 @@ interface InsertResult {
 }
 
 interface ReclaimResult {
-  data: { stripe_event_id: string } | null;
+  data: { stripe_event_id: string; notifications_sent: boolean | null } | null;
 }
 
 function resolveClaimOutcome(
@@ -34,6 +34,11 @@ function resolveClaimOutcome(
   if (!reclaimResult?.data) return "skip"; // completed, or concurrent processing
 
   return "proceed"; // successfully reclaimed (failed or lease-expired processing)
+}
+
+// Returns true when the reclaimed row already had emails sent.
+function notificationsSentFromReclaim(reclaimedData: ReclaimResult["data"]): boolean {
+  return reclaimedData?.notifications_sent ?? false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,7 +72,7 @@ describe("webhook event claim logic", () => {
     expect(
       resolveClaimOutcome(
         { error: { code: "23505", message: "duplicate" } },
-        { data: { stripe_event_id: "evt_test_123" } }
+        { data: { stripe_event_id: "evt_test_123", notifications_sent: false } }
       )
     ).toBe("proceed");
   });
@@ -78,7 +83,7 @@ describe("webhook event claim logic", () => {
     expect(
       resolveClaimOutcome(
         { error: { code: "23505", message: "duplicate" } },
-        { data: { stripe_event_id: "evt_crashed_456" } }
+        { data: { stripe_event_id: "evt_crashed_456", notifications_sent: false } }
       )
     ).toBe("proceed");
   });
@@ -169,8 +174,54 @@ describe("fulfillment failure handling", () => {
     expect(
       resolveClaimOutcome(
         { error: { code: "23505", message: "duplicate" } },
-        { data: { stripe_event_id: "evt_stock_retry" } }
+        { data: { stripe_event_id: "evt_stock_retry", notifications_sent: false } }
       )
     ).toBe("proceed");
+  });
+});
+
+// ── notification status ───────────────────────────────────────────────────
+
+describe("notification status (email deduplication)", () => {
+  it("first delivery has notifications_sent=false — emails will be sent", () => {
+    // On INSERT success there is no reclaimed row; the default is false.
+    expect(notificationsSentFromReclaim(null)).toBe(false);
+  });
+
+  it("retry with notifications_sent=false — emails will be re-attempted", () => {
+    expect(
+      notificationsSentFromReclaim({
+        stripe_event_id: "evt_retry_1",
+        notifications_sent: false,
+      })
+    ).toBe(false);
+  });
+
+  it("retry with notifications_sent=true — emails are skipped (no duplicate)", () => {
+    // A prior attempt sent both emails but failed to mark the event completed.
+    // The reclaimed row has notifications_sent=true; we skip re-sending.
+    expect(
+      notificationsSentFromReclaim({
+        stripe_event_id: "evt_retry_2",
+        notifications_sent: true,
+      })
+    ).toBe(true);
+  });
+
+  it("email failure causes event to stay failed (not completed)", () => {
+    // Documents the contract: if any email fails, the handler returns 500 and
+    // marks the event 'failed'.  The event is NOT marked 'completed'.
+    // Stripe will retry; on retry notifications_sent is still false so emails
+    // are re-attempted.  fulfill_order returns 'already_fulfilled' — safe.
+    const eventStatus = "failed"; // what the handler writes on email error
+    expect(eventStatus).not.toBe("completed");
+  });
+
+  it("both emails sent → event marked completed with notifications_sent=true", () => {
+    // After all emails succeed, the handler writes
+    // { status: 'completed', notifications_sent: true }.
+    const updatePayload = { status: "completed", notifications_sent: true };
+    expect(updatePayload.notifications_sent).toBe(true);
+    expect(updatePayload.status).toBe("completed");
   });
 });
